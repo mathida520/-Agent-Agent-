@@ -7,7 +7,6 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import sys
 import os
-import json
 import traceback
 from datetime import datetime
 import logging
@@ -22,10 +21,6 @@ from enum import Enum
 import asyncio
 import nest_asyncio
 from AgentCore.Agents.user_agent_a2a import AmazonServiceManager
-from dotenv import load_dotenv
-
-# 加载环境变量
-load_dotenv()
 
 # 设置nest_asyncio以支持嵌套事件循环
 nest_asyncio.apply()
@@ -89,7 +84,7 @@ class AgentServerManager:
             
             # 确保必要的环境变量存在
             if not env.get('MODELSCOPE_SDK_TOKEN'):
-                env['MODELSCOPE_SDK_TOKEN'] = 'ms-8fa443fb-2162-45da-b88d-d7d3582e4ad8'
+                env['MODELSCOPE_SDK_TOKEN'] = '9d3aed4d-eca1-4e0c-9805-cb923ccbbf21'
                 print("为 " + agent_name + " 设置MODELSCOPE_SDK_TOKEN")
             
             if not env.get('FEWSATS_API_KEY'):
@@ -1075,18 +1070,7 @@ def not_found(error):
     return jsonify({
         'success': False,
         'error': '请求的资源不存在',
-        'available_endpoints': [
-            '/api/chat', 
-            '/api/health', 
-            '/api/status', 
-            '/api/agents/start', 
-            '/api/agents/stop', 
-            '/api/agents/status',
-            '/api/orders/<order_id>',
-            '/api/orders',
-            '/api/orders/<order_id>/confirm',
-            '/api/orders/<order_id>/blockchain'
-        ]
+        'available_endpoints': ['/api/chat', '/api/health', '/api/status', '/api/agents/start', '/api/agents/stop', '/api/agents/status']
     }), 404
 
 @app.errorhandler(500)
@@ -1147,281 +1131,93 @@ def market_trade():
     })
 
 
-# ==============================================================================
-#  订单管理 API 接口
-# ==============================================================================
-
-# Merchant Agent 配置
-MERCHANT_AGENT_URL = os.environ.get("MERCHANT_AGENT_URL", "http://localhost:5020")
-
-def get_merchant_agent_client():
-    """获取 Merchant Agent 客户端"""
-    if not A2A_CLIENT_AVAILABLE:
-        return None
+@app.route("/api/agent-card", methods=["GET", "POST"])
+def get_agent_card():
+    """
+    获取 Agent Card 数据
+    从 XooBay API 拉取商品数据并转换为 AgentCard 格式
+    
+    GET/POST 参数:
+        product_id (int, required): 商品ID
+        store_id (int, optional): 商家ID（可选，如果不提供则从商品数据中获取）
+        lang (str, optional): 语言代码 (zh_cn, en, zh_hk, ru)，默认为 zh_cn
+    
+    Returns:
+        JSON 响应:
+        {
+            "success": true/false,
+            "data": {...},  # AgentCard 格式的数据
+            "error": "..."  # 错误信息（如果失败）
+        }
+    """
+    # 导入 XooBay 工具包（在函数外部导入，确保异常处理正确）
     try:
-        return A2AClient(MERCHANT_AGENT_URL)
-    except Exception as e:
-        logger.error(f"❌ 无法连接到 Merchant Agent: {e}")
-        return None
-
-def query_order_from_merchant_agent(order_id: str) -> Optional[Dict[str, Any]]:
-    """通过 Merchant Agent 查询订单"""
+        from AgentCore.Tools.xoobay_toolkit import get_agent_card_data, XooBayAPIError
+    except ImportError as e:
+        logger.error(f"导入 XooBay 工具包失败: {e}")
+        return jsonify({
+            "success": False,
+            "error": "系统配置错误: 无法加载 XooBay 工具包"
+        }), 500
+    
     try:
-        client = get_merchant_agent_client()
-        if not client:
-            return None
+        # 获取请求参数（支持 GET 和 POST）
+        if request.method == "POST":
+            data = request.get_json() or {}
+        else:
+            data = request.args.to_dict()
         
-        # 通过 A2A 协议查询订单
-        query_text = f"查询订单 {order_id}"
-        response = client.ask(query_text)
+        # 提取参数
+        product_id = data.get("product_id") or data.get("productId")
+        store_id = data.get("store_id") or data.get("storeId")
+        lang = data.get("lang", "zh_cn")
         
-        # 尝试从响应中解析订单信息
-        # 如果响应包含 JSON，尝试解析
-        if "{" in response and "}" in response:
-            try:
-                start = response.find("{")
-                end = response.rfind("}") + 1
-                json_str = response[start:end]
-                order_data = json.loads(json_str)
-                if "order_id" in order_data:
-                    return order_data
-            except:
-                pass
-        
-        # 如果无法解析 JSON，返回 None（需要其他方式获取）
-        return None
-    except Exception as e:
-        logger.error(f"❌ 查询订单失败: {e}")
-        return None
-
-def list_orders_from_merchant_agent(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """通过 Merchant Agent 获取订单列表"""
-    try:
-        client = get_merchant_agent_client()
-        if not client:
-            return []
-        
-        # 通过 A2A 协议查询所有订单
-        query_text = "查询订单" if not user_id else f"查询用户 {user_id} 的订单"
-        response = client.ask(query_text)
-        
-        # 由于 A2A 返回的是文本，这里需要其他方式获取订单列表
-        # 暂时返回空列表，需要实现更直接的数据访问方式
-        return []
-    except Exception as e:
-        logger.error(f"❌ 获取订单列表失败: {e}")
-        return []
-
-def confirm_order_completion(order_id: str) -> Dict[str, Any]:
-    """确认订单完成（确认收货）"""
-    try:
-        client = get_merchant_agent_client()
-        if not client:
-            return {
+        # 验证必需参数
+        if not product_id:
+            return jsonify({
                 "success": False,
-                "error": "无法连接到 Merchant Agent"
-            }
-        
-        # 通过 A2A 协议完成订单
-        confirm_text = f"完成订单 {order_id}"
-        response = client.ask(confirm_text)
-        
-        # 尝试解析响应
-        if "{" in response and "}" in response:
-            try:
-                start = response.find("{")
-                end = response.rfind("}") + 1
-                json_str = response[start:end]
-                result = json.loads(json_str)
-                return result
-            except:
-                pass
-        
-        # 如果响应包含成功关键词，返回成功
-        if "完成" in response or "成功" in response or "completed" in response.lower():
-            return {
-                "success": True,
-                "message": "订单确认成功",
-                "order_id": order_id
-            }
-        
-        return {
-            "success": False,
-            "error": "订单确认失败",
-            "response": response
-        }
-    except Exception as e:
-        logger.error(f"❌ 确认订单失败: {e}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
-
-def get_blockchain_transactions(order_id: str) -> List[Dict[str, Any]]:
-    """获取订单的链上交易信息"""
-    try:
-        # 先获取订单信息
-        order_data = query_order_from_merchant_agent(order_id)
-        if not order_data:
-            return []
-        
-        transactions = []
-        
-        # 从订单元数据中提取区块链交易信息
-        metadata = order_data.get("metadata", {})
-        blockchain_tx_hashes = metadata.get("blockchain_tx_hashes", {})
-        
-        # 支付交易
-        if blockchain_tx_hashes.get("payment"):
-            transactions.append({
-                "tx_hash": blockchain_tx_hashes["payment"],
-                "transaction_type": "payment",
-                "status": "confirmed",
-                "timestamp": order_data.get("payment_info", {}).get("paid_at")
-            })
-        
-        # 交付交易
-        if blockchain_tx_hashes.get("delivery"):
-            transactions.append({
-                "tx_hash": blockchain_tx_hashes["delivery"],
-                "transaction_type": "delivery",
-                "status": "confirmed",
-                "timestamp": order_data.get("delivered_at")
-            })
-        
-        # 完成交易
-        if blockchain_tx_hashes.get("completed"):
-            transactions.append({
-                "tx_hash": blockchain_tx_hashes["completed"],
-                "transaction_type": "completed",
-                "status": "confirmed",
-                "timestamp": order_data.get("completed_at")
-            })
-        
-        return transactions
-    except Exception as e:
-        logger.error(f"❌ 获取链上交易信息失败: {e}")
-        return []
-
-@app.route('/api/orders/<order_id>', methods=['GET'])
-def get_order(order_id: str):
-    """获取订单详情"""
-    try:
-        logger.info(f"📦 查询订单: {order_id}")
-        
-        # 通过 Merchant Agent 查询订单
-        order_data = query_order_from_merchant_agent(order_id)
-        
-        if not order_data:
-            return jsonify({
-                'success': False,
-                'error': '订单不存在或无法访问',
-                'order_id': order_id
-            }), 404
-        
-        return jsonify({
-            'success': True,
-            'order': order_data,
-            'timestamp': datetime.now().isoformat()
-        })
-        
-    except Exception as e:
-        logger.error(f"❌ 获取订单详情失败: {e}")
-        logger.error(traceback.format_exc())
-        return jsonify({
-            'success': False,
-            'error': '获取订单详情失败',
-            'error_detail': str(e),
-            'timestamp': datetime.now().isoformat()
-        }), 500
-
-@app.route('/api/orders', methods=['GET'])
-def get_orders():
-    """获取用户所有订单"""
-    try:
-        # 获取用户ID（可选参数）
-        user_id = request.args.get('user_id', None)
-        
-        logger.info(f"📋 查询订单列表，用户ID: {user_id or 'all'}")
-        
-        # 通过 Merchant Agent 获取订单列表
-        orders = list_orders_from_merchant_agent(user_id)
-        
-        return jsonify({
-            'success': True,
-            'orders': orders,
-            'count': len(orders),
-            'timestamp': datetime.now().isoformat()
-        })
-        
-    except Exception as e:
-        logger.error(f"❌ 获取订单列表失败: {e}")
-        logger.error(traceback.format_exc())
-        return jsonify({
-            'success': False,
-            'error': '获取订单列表失败',
-            'error_detail': str(e),
-            'timestamp': datetime.now().isoformat()
-        }), 500
-
-@app.route('/api/orders/<order_id>/confirm', methods=['POST'])
-def confirm_order(order_id: str):
-    """确认收货"""
-    try:
-        logger.info(f"✅ 确认订单: {order_id}")
-        
-        # 确认订单完成
-        result = confirm_order_completion(order_id)
-        
-        if not result.get("success"):
-            return jsonify({
-                'success': False,
-                'error': result.get("error", "确认订单失败"),
-                'order_id': order_id
+                "error": "缺少必需参数: product_id"
             }), 400
         
+        try:
+            product_id = int(product_id)
+        except (ValueError, TypeError):
+            return jsonify({
+                "success": False,
+                "error": f"无效的商品ID: {product_id}，必须是整数"
+            }), 400
+        
+        if store_id:
+            try:
+                store_id = int(store_id)
+            except (ValueError, TypeError):
+                logger.warning(f"无效的商家ID: {store_id}，将忽略此参数")
+                store_id = None
+        
+        # 从 XooBay API 获取数据并转换为 AgentCard 格式
+        logger.info(f"获取 AgentCard 数据: product_id={product_id}, store_id={store_id}, lang={lang}")
+        agent_card_data = get_agent_card_data(product_id, store_id, lang)
+        
+        # 返回成功响应
         return jsonify({
-            'success': True,
-            'message': result.get("message", "订单确认成功"),
-            'order_id': order_id,
-            'timestamp': datetime.now().isoformat()
+            "success": True,
+            "data": agent_card_data
         })
         
-    except Exception as e:
-        logger.error(f"❌ 确认订单失败: {e}")
-        logger.error(traceback.format_exc())
+    except XooBayAPIError as e:
+        # XooBay API 错误
+        logger.error(f"XooBay API 错误: {e}")
         return jsonify({
-            'success': False,
-            'error': '确认订单失败',
-            'error_detail': str(e),
-            'timestamp': datetime.now().isoformat()
+            "success": False,
+            "error": str(e)
         }), 500
-
-@app.route('/api/orders/<order_id>/blockchain', methods=['GET'])
-def get_order_blockchain(order_id: str):
-    """获取订单的链上交易信息"""
-    try:
-        logger.info(f"⛓️ 查询订单链上交易: {order_id}")
-        
-        # 获取链上交易信息
-        transactions = get_blockchain_transactions(order_id)
-        
-        return jsonify({
-            'success': True,
-            'order_id': order_id,
-            'transactions': transactions,
-            'count': len(transactions),
-            'timestamp': datetime.now().isoformat()
-        })
         
     except Exception as e:
-        logger.error(f"❌ 获取链上交易信息失败: {e}")
-        logger.error(traceback.format_exc())
+        # 其他错误
+        logger.error(f"获取 AgentCard 数据时发生错误: {e}", exc_info=True)
         return jsonify({
-            'success': False,
-            'error': '获取链上交易信息失败',
-            'error_detail': str(e),
-            'timestamp': datetime.now().isoformat()
+            "success": False,
+            "error": f"服务器内部错误: {str(e)}"
         }), 500
 
 
@@ -1454,7 +1250,7 @@ def get_order_blockchain(order_id: str):
     print("   • Agent间协作通信")
     print("   • 多用户多会话支持")
     print()
-    print(" 访问地址: http://localhost:8000")
+    print(" 访问地址: http://localhost:5000")
     print(" 主要API:")
     print("   • POST /api/chat - 聊天接口（纯A2A模式）")
     print("   • GET /api/health - A2A服务健康检查")
@@ -1463,7 +1259,7 @@ def get_order_blockchain(order_id: str):
     print("   • POST /api/agents/stop - 停止Agent服务器")
     print()
     print(" 使用示例:")
-    print("   curl -X POST http://localhost:8000/api/chat \\")
+    print("   curl -X POST http://localhost:5000/api/chat \\")
     print("        -H 'Content-Type: application/json' \\")
     print("        -d '{\"message\":\"我想买iPhone 15\",\"user_id\":\"user123\"}'")
     print()
@@ -1485,7 +1281,7 @@ if __name__ == '__main__':
         logger.info(" 启动Flask Web服务器...")
         app.run(
             host='0.0.0.0',
-            port=8000,
+            port=5000,
             debug=False,
             threaded=True  # 启用多线程支持异步调用和A2A通信
         )
